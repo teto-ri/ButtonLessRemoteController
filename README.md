@@ -1,1 +1,2 @@
-# ButtonLessRemoteController
+# 버튼 리스 트랙패드 커스텀 리모컨
+ - 2022 2학기 어드벤처디자인 텀프로젝트
