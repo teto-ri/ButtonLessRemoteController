@@ -21,9 +21,11 @@ struct storedIRDataStruct
 {
   IRData receivedIRData[26];
   // extensions for sendRaw
+  uint8_t rawCode[6][RAW_BUFFER_LENGTH]; // The durations if raw
+  uint8_t rawCodeLength[6]; // The length of the code
 } sStoredIRData;
 
-bool IRDataExist[26];
+uint8_t IRDataExist[26];
 
 /* Define the digital pins used for the clock and data */
 #define SCL_PIN 8
@@ -69,7 +71,7 @@ void setup()
 
   for (int i = 0; i < 26; i++)
   {
-    IRDataExist[i] = false;
+    IRDataExist[i] = 0;
   }
 
   IRDataRetrieveFromEEPROM(); // retrieve IRData from EEPROM
@@ -88,6 +90,27 @@ void loop()
      so not to flood the serial port*/
 
   delay(10);
+}
+
+uint8_t gestureMap[6];
+uint8_t gestureMapIdx = 0;
+uint8_t rawDataGestureMapping(uint8_t idx) {
+  if (gestureMapIdx >= 6) {
+     gestureMapIdx = 0;
+  }
+  for (uint8_t i = 0; i < 6; i++) {
+    if (gestureMap[i] == idx) {
+      return i;
+    }
+  }
+  gestureMap[gestureMapIdx] = idx;
+  gestureMapIdx++;
+  return gestureMapIdx-1;
+}
+uint8_t rawDataGestureGetting(uint8_t idx) {
+  for (uint8_t i = 0; i < 6; i++) {
+    if (gestureMap[i] == idx) return i;
+  }
 }
 
 struct EEPROM_IRData // total 16bytes
@@ -120,7 +143,7 @@ void IRDataClearFromEEPROM() {
 void IRDataClearFromSRAM() {
   for (int i = 0; i < 26; i++)
   {
-    IRDataExist[i] = false;
+    IRDataExist[i] = 0;
   }
 }
 
@@ -144,7 +167,7 @@ void EEPROM_read_IRData(int idx)
     return; // data not exist
   EEPROM_IRData buffer;
   EEPROM.get(idx * 16, buffer);
-  IRDataExist[idx] = true;
+  IRDataExist[idx] = 1;
   sStoredIRData.receivedIRData[idx].protocol = buffer.protocol;
   sStoredIRData.receivedIRData[idx].address = buffer.address;
   sStoredIRData.receivedIRData[idx].command = buffer.command;
@@ -173,27 +196,42 @@ bool storeCode(IRData *aIRReceivedData, int idx)
   {
     return false;
   }
+  
+  sStoredIRData.receivedIRData[idx] = *aIRReceivedData; // SRAM store
+  
   if (aIRReceivedData->protocol == UNKNOWN)
   {
-    Serial.println(F("UNKNOWN protocol, skipped."));
-    return false;
+    uint8_t rawIdx = rawDataGestureMapping(idx);
+    Serial.print(F("Received unknown code and store "));
+    Serial.print(IrReceiver.decodedIRData.rawDataPtr->rawlen - 1);
+    Serial.println(F(" timing entries as raw "));
+    IrReceiver.printIRResultRawFormatted(&Serial, true); // Output the results in RAW format
+    sStoredIRData.rawCodeLength[rawIdx] = IrReceiver.decodedIRData.rawDataPtr->rawlen - 1;
+    /*
+     * Store the current raw data in a dedicated array for later usage
+     */
+    IrReceiver.compensateAndStoreIRResultInArray(sStoredIRData.rawCode[rawIdx]);
+    IRDataExist[idx] = 2;
+    Serial.print(F("Raw data mapping: "));
+    Serial.print(idx);
+    Serial.print(F(" to "));
+    Serial.println(rawIdx);
   }
-
-  sStoredIRData.receivedIRData[idx] = *aIRReceivedData; // SRAM store
-
-  IrReceiver.printIRResultShort(&Serial);
-  sStoredIRData.receivedIRData[idx].flags = 0; // clear flags -esp. repeat- for later sending
-
-  EEPROM_write_IRData(aIRReceivedData, idx); // EEPROM store
-
-  IRDataExist[idx] = true;
+  else
+  {
+    sStoredIRData.receivedIRData[idx].flags = 0; // clear flags -esp. repeat- for later sending
+    IrReceiver.printIRResultShort(&Serial);
+    EEPROM_write_IRData(aIRReceivedData, idx); // EEPROM store
+    IRDataExist[idx] = 1;
+  }
+  
   Serial.println();
   return true;
 }
 
 void sendCode(storedIRDataStruct *aIRDataToSend, int idx)
 {
-  if (!IRDataExist[idx])
+  if (IRDataExist[idx] == 0)
   {
     Serial.println(F("Not Sent: Not found"));
     return;
@@ -203,7 +241,21 @@ void sendCode(storedIRDataStruct *aIRDataToSend, int idx)
   auto tAddress = aIRDataToSend->receivedIRData[idx].address;
   auto tCommand = aIRDataToSend->receivedIRData[idx].command;
 
-  if (tProtocol == LG2)
+  if (tProtocol == UNKNOWN) 
+  {
+    uint8_t rawIdx = rawDataGestureGetting(idx);
+    // Assume 38 KHz
+    IrSender.sendRaw(aIRDataToSend->rawCode[rawIdx], aIRDataToSend->rawCodeLength[rawIdx], 38);
+    Serial.print(F("Raw data mapping: "));
+    Serial.print(idx);
+    Serial.print(F(" to "));
+    Serial.println(rawIdx);
+    Serial.print(F("Sent raw "));
+    Serial.print(aIRDataToSend->rawCodeLength[rawIdx]);
+    Serial.println(F(" marks or spaces"));
+    return;
+  }
+  else if (tProtocol == LG2)
   {
     IrSender.sendLG2(tAddress, tCommand, 3);
   }
@@ -535,6 +587,47 @@ int gesture_preset[gesture_preset_length_1][gesture_preset_length_2] = {
     {1, 2}                                                   // circular(clockwise, counter-clockwise)
 }
 */
+void showGestureSerial(int idx) {
+  if (idx < 16) {
+    Serial.print(F("Keypad: "));
+    Serial.println(idx + 1);
+    return;
+  }
+  Serial.print(F("Shape: "));
+  switch(idx) {
+    case 16:
+      Serial.print(F("→"));
+      break;
+    case 17:
+      Serial.print(F("↗"));
+      break;
+    case 18:
+      Serial.print(F("↑"));
+      break;
+    case 19:
+      Serial.print(F("↖"));
+      break;
+    case 20:
+      Serial.print(F("←"));
+      break;
+    case 21:
+      Serial.print(F("↙"));
+      break;
+    case 22:
+      Serial.print(F("↓"));
+      break;
+    case 23:
+      Serial.print(F("↘"));
+      break;
+    case 24:
+      Serial.print(F("↻"));
+      break;
+    case 25:
+      Serial.print(F("↺"));
+      break;
+  }
+  Serial.println();
+}
 /*
   gesture_preset_idx;
   tap: 0-15;
@@ -651,14 +744,15 @@ void keypad_process()
     operation_mode = 0;
   }
 
-  Serial.print(F("Gesture type: "));
+  /*Serial.print(F("Gesture type: "));
   Serial.print(keypad_gesture_type);
   Serial.print(F(" "));
   Serial.print(F("Gesture idx: "));
   Serial.print(keypad_gesture_idx);
   Serial.print(F(" "));
   Serial.print(F("Gesture value: "));
-  Serial.println(keypad_gesture_value);
+  Serial.println(keypad_gesture_value);*/
+  showGestureSerial(keypad_gesture_idx);
 
   keypad_process_success = true;
 
